@@ -1,4 +1,4 @@
-# nfl-production-charting
+# NFL Production Charting
 
 ## About
 
@@ -8,10 +8,4 @@ A series of R scripts import, wrangle, and tidy the data. Data is sourced primar
 
 `renv` is used to manage the package dependencies and provides a reproducible environment for the repository.
 
-Plot output is consistent charting using the custom `baseliner` theme:
-
-![Passing Production](cpoe_epa.png)
-
-![Receiving Production](wopr_fppt.png)
-
-![Rushing Production](wopg_fppwo.png)
+Plot output is consistent charting using the custom `baseliner` theme.
