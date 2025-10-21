@@ -14,7 +14,7 @@ library(ggrepel)
 
 # global variables
 season <- nflreadr::most_recent_season()
-current_week <- 0
+current_week <- 7
 
 # baseliner style and color
 style <- read_json(system.file("style.json", package = "baseliner"))
@@ -52,80 +52,62 @@ teams <- nflreadr::load_teams() %>%
   select(team = team_abbr, team_pri = team_color, team_sec = team_color2)
 
 # load base nflverse stats
-wr_stats <- nflfastR::calculate_stats(
-  seasons = season,
-  summary_level = "season",
-  stat_type = "player",
-  season_type = "REG"
-) %>%
-  filter(position == "WR") %>%
+base_stats <- nflfastR::calculate_stats(summary_level = "week", stat_type = "player") %>%
+  filter(position %in% c("WR", "TE") & week == current_week) %>%
   transmute(
     id = player_id,
     name = player_display_name,
     short = player_name,
-    pos = position,
-    team = recent_team,
-    gp = games,
-    tgt = targets,
-    rec = receptions,
-    td = receiving_tds,
-    fum = receiving_fumbles,
-    iay = receiving_air_yards,
-    yac = receiving_yards_after_catch,
-    fd = receiving_first_downs,
+    position,
+    # team = recent_team, # season-level only
+    team, # week-level only
+    # gp = games, # season-level only
+    receiving_fumbles,
+    receiving_first_downs,
     racr,
-    tgt_share = target_share,
-    ay_share = air_yards_share,
+    target_share,
+    air_yards_share,
     wopr,
-    wopr_scaled = wopr * (17 / gp),
-    fpts = fantasy_points_ppr + 0.5 * fd,
-    fppg = fpts / gp,
-    fppt = fpts / tgt,
-    fppr = fpts / rec
-  ) %>%
-  arrange(desc(fpts)) %>%
-  mutate(rank = seq_len(nrow(.))) %>%
-  slice(1:50)
-
-# load play-by-play stats
-pbp_stats <- nflfastR::load_pbp(season) %>%
-  filter(complete_pass == 1) %>%
-  filter(air_yards < yardline_100) %>%
-  filter(!is.na(xyac_epa)) %>%
-  group_by(receiver_id) %>%
-  summarize(
-    epa_oe = mean(yac_epa - xyac_epa),
-    xfd = mean(xyac_fd),
-    fd_oe = mean(first_down - xyac_fd),
-    yac_epa = sum(yac_epa),
-    xyac = sum(xyac_mean_yardage),
-    xyac_epa = sum(xyac_epa)
-  ) %>%
-  ungroup() %>%
-  select(id = receiver_id, everything())
-
-# merge base stats and play-by-play stats with team info
-stats <- wr_stats %>%
-  inner_join(
-    pbp_stats,
-    by = "id"
-  ) %>%
-  inner_join(
-    teams,
-    by = "team"
+    fpts = fantasy_points_ppr + 0.5 * receiving_first_downs,
+    # fppg = fpts / gp, # season-level only
   )
 
+# load nfl pro stats
+nfl_stats <- read_csv(here("data", "nfl", "receiving", paste0("2025_0", current_week, ".csv"))) %>%
+  mutate(name = player) %>%
+  select(name, everything(), -player, -position)
+
+# merge stats and team info
+stats <- base_stats %>%
+  inner_join(nfl_stats, by = "name") %>%
+  inner_join(teams, by = "team") %>%
+  mutate(
+    targets_rr = replace_na(as.numeric(targets / routes), 0),
+    yards_rr = replace_na(as.numeric(receiving_yards / routes), 0),
+    points_rr = replace_na(as.numeric(fpts / routes), 0),
+    firsts_rr = replace_na(as.numeric(receiving_first_downs / routes), 0),
+    points_tgt = replace_na(as.numeric(fpts / targets), 0)
+  ) %>%
+  group_by(position) %>%
+  group_modify(function(.x, .y) {
+    n <- if (.y$position == "WR") 40 else 10
+    slice_max(.x, order_by = fpts, n = n)
+  }) %>%
+  ungroup() %>%
+  arrange(desc(fpts))
+
+# manual modification
+stats <- stats %>%
+  filter(targets > 3)
+
 # set dynamic axis limits
-wopr_fppt_lims <- list(
-  xlim = c(min(stats$wopr_scaled) - 0.01, max(stats$wopr_scaled) + 0.01),
-  ylim = c(min(stats$fppt) - 0.01, max(stats$fppt) + 0.01)
+lims <- list(
+  xlim = c(min(stats$targets_rr) - 0.01, max(stats$targets_rr) + 0.01),
+  ylim = c(min(stats$points_rr) - 0.01, max(stats$points_rr) + 0.01)
 )
 
-# plot fppt (y-axis) by wopr (x-axis)
-wopr_fppt <- ggplot(
-  stats,
-  aes(x = wopr_scaled, y = fppt)
-) +
+# plot points per route run (y-axis) by targets per route run (x-axis)
+plot <- ggplot(stats, aes(x = targets_rr, y = points_rr)) +
   geom_point(
     aes(
       fill = ifelse(team %in% flip_color, team_sec, team_pri),
@@ -133,7 +115,8 @@ wopr_fppt <- ggplot(
     ),
     shape = 21,
     size = 2,
-    stroke = 1
+    stroke = 1,
+    show.legend = FALSE
   ) +
   scale_fill_identity() +
   scale_color_identity() +
@@ -144,22 +127,21 @@ wopr_fppt <- ggplot(
     size = 2.5,
     point.padding = 0.5,
     box.padding = 0.25,
-    max.overlaps = Inf
+    max.overlaps = Inf,
+    show.legend = FALSE
   ) +
   scale_x_continuous(
-    limits = wopr_fppt_lims$xlim,
-    breaks = seq(0.4, 0.8, by = 0.2)
+    limits = lims$xlim
   ) +
   scale_y_continuous(
-    limits = wopr_fppt_lims$ylim,
-    breaks = seq(1.5, 2.5, by = 0.5)
+    limits = lims$ylim
   ) +
   annotate(
     "segment",
-    x = wopr_fppt_lims$xlim[1] + 0.01,
-    xend = wopr_fppt_lims$xlim[2] - 0.01,
-    y = median(stats$fppt, na.rm = TRUE),
-    yend = median(stats$fppt, na.rm = TRUE),
+    x = lims$xlim[1] + 0.01,
+    xend = lims$xlim[2] - 0.01,
+    y = mean(stats$points_rr, na.rm = TRUE),
+    yend = mean(stats$points_rr, na.rm = TRUE),
     color = color$london[[3]],
     linewidth = 0.5,
     linetype = "dashed",
@@ -167,10 +149,10 @@ wopr_fppt <- ggplot(
   ) +
   annotate(
     "segment",
-    x = median(stats$wopr_scaled, na.rm = TRUE),
-    xend = median(stats$wopr_scaled, na.rm = TRUE),
-    y = wopr_fppt_lims$ylim[1] + 0.01,
-    yend = wopr_fppt_lims$ylim[2] - 0.01,
+    x = mean(stats$targets_rr, na.rm = TRUE),
+    xend = mean(stats$targets_rr, na.rm = TRUE),
+    y = lims$ylim[1] + 0.01,
+    yend = lims$ylim[2] - 0.01,
     color = color$london[[3]],
     linewidth = 0.5,
     linetype = "dashed",
@@ -178,14 +160,13 @@ wopr_fppt <- ggplot(
   ) +
   labs(
     title = "Throw Me the Damn Ball",
-    subtitle = "Receiver Production in 2024",
-    caption = paste0(
-      "Charting: Lukas Nesheim (data via nflverse)\n   ",
-      "\u2020 Weighted Opportunity Rating is defined as: (1.5 \u00D7 target share) + (0.7 \u00d7 air yards share)."
-    ),
-    x = expression("Weighted Opportunity Rating"^"\u2020"),
-    y = "Fantasy Points per Target"
+    subtitle = paste0("Receiver Production in Week ", current_week),
+    caption = paste0("Charting: Lukas Nesheim (data via nflverse, NFL+)"),
+    x = "Targets per Route Run",
+    y = "Fantasy Points per Route Run"
   ) +
-  theme_baseline_gg()
+  geom_smooth(method = "lm", se = FALSE, linewidth = 0.5, color = "#333333") +
+  theme_baseline_gg() +
+  theme(plot.subtitle = element_text(family = "Montserrat-SemiBold", color = color$london[[5]]))
 
-ggsave("wopr_fppt.png", wopr_fppt, height = 6, width = 6, units = "in", dpi = 600)
+ggsave("receiving.png", plot, height = 6, width = 6, units = "in", dpi = 600)
